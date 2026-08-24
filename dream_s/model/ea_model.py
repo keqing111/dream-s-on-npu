@@ -486,8 +486,9 @@ class EaModel(nn.Module):
             )
             all_attention_scores = [draft_score] 
         else:
-            draft_input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token,  target_score, draft_score = initialize_tree(
-                input_ids, self, past_key_values, logits_processor, self.embed_model, pixel_values, image_sizes
+            draft_input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token,  target_score, draft_score, image_start, image_end, text_start, text_end = initialize_tree(
+                input_ids, self, past_key_values, logits_processor, self.embed_model, pixel_values, image_sizes,
+                original_prompt_length=original_prompt_length
             )
             all_attention_scores = []
 
