@@ -29,8 +29,13 @@ from torch import nn
 # parser.add_argument('--outdir', type=str, default='/scratch/zl5961/EfficientMultimodalSpeculativeDecoding/eagle/ge_data/llava_vicuna_7B_ofa_mmt_half')
 from transformers.activations import ACT2FN
 from transformers import DynamicCache
-from transformers.pytorch_utils import (find_pruneable_heads_and_indices,
-                                        prune_linear_layer)
+from transformers.pytorch_utils import prune_linear_layer
+try:
+    from transformers.pytorch_utils import find_pruneable_heads_and_indices
+except ImportError:
+    # transformers >= 5.0 removed find_pruneable_heads_and_indices;
+    # only used by prune_atttention_heads (WIP method, never called).
+    find_pruneable_heads_and_indices = None
 
 try:
     from .configs import EConfig
@@ -41,7 +46,11 @@ except:
     from utils_c import *
     from choices import *
     from utils import prepare_logits_processor
-from thop import profile
+try:
+    from thop import profile
+except ImportError:
+    # thop is only imported, never called anywhere in the codebase.
+    profile = None
 
 
 

@@ -4,6 +4,7 @@
 
 """ PyTorch LLaMA model."""
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -19,6 +20,16 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     SequenceClassifierOutputWithPast,
 )
+
+
+@dataclass
+class BaseModelOutputWithPastAndAttnScores(BaseModelOutputWithPast):
+    """
+    DREAM-S: BaseModelOutputWithPast extended with an optional per-position
+    attention-score tensor (used for target-aware refinement).
+    """
+
+    attn_scores: Optional[torch.FloatTensor] = None
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (
     add_start_docstrings,
@@ -1031,9 +1042,6 @@ class LlamaModel(LlamaPreTrainedModel):
         attan_scores = None 
         next_decoder_cache = () if use_cache else None
 
-        mid_attention_score = None
-        second_hidden_state = None
-
         for idx, decoder_layer in enumerate(self.layers):
             # if idx==16:
             #     print(idx)
@@ -1071,11 +1079,6 @@ class LlamaModel(LlamaPreTrainedModel):
                     output_attan_score=output_attan_score,
                 )
 
-                # if output_attan_score and idx == 31:
-                #     mid_attention_score = layer_outputs[-1]
-                if idx == 31:
-                    second_hidden_state = layer_outputs[0]
-
             hidden_states = layer_outputs[0]
 
             if use_cache:
@@ -1084,15 +1087,10 @@ class LlamaModel(LlamaPreTrainedModel):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
             
-        # if output_attan_score:
-        #     attan_scores = mid_attention_score
-
         if output_attan_score:
             attan_scores = layer_outputs[-1]
-        
 
         hidden_states = self.norm(hidden_states)
-        second_last_hidden_state = self.norm(second_hidden_state)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1105,7 +1103,7 @@ class LlamaModel(LlamaPreTrainedModel):
                 for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, attan_scores]
                 if v is not None
             )
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastAndAttnScores(
             # last_hidden_state=second_last_hidden_state,
             last_hidden_state=hidden_states,
             # second_last_hidden_state=second_last_hidden_state,

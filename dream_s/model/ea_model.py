@@ -12,15 +12,13 @@ from transformers import PreTrainedModel, PretrainedConfig,AutoConfig
 
 
 from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
-from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
-from .modeling_qwen2_kv import LlamaForCausalLM as KVQwen2ForCausalLM
 from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration, AutoProcessor
 from .modeling_llava_next import LlavaNextForConditionalGeneration
 
-from .utils_head import *
+from .utils import *
 from .kv_cache import initialize_past_key_values
 
-from .cnetsimport Model
+from .cnets import Model
 from .configs import EConfig
 
 
@@ -122,14 +120,6 @@ class EaModel(nn.Module):
         Type=AutoConfig.from_pretrained(base_model_path).architectures[0]
         if Type=='LlamaForCausalLM':
             base_model = KVLlamaForCausalLM.from_pretrained(
-                base_model_path, **kwargs
-            )
-        elif Type=='Qwen2ForCausalLM':
-            base_model=KVQwen2ForCausalLM.from_pretrained(
-                base_model_path, **kwargs
-            )
-        elif Type=='MixtralForCausalLM':
-            base_model = KVMixtralForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
         elif Type=='LlavaNextForConditionalGeneration':

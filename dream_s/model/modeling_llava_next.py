@@ -204,11 +204,11 @@ class LlavaNextMultiModalProjector(nn.Module):
         self.linear_1 = nn.Linear(
             config.vision_config.hidden_size * num_feature_layers,
             config.text_config.hidden_size,
-            bias=config.multimodal_projector_bias,
+            bias=getattr(config, "multimodal_projector_bias", True),
         )
         self.act = ACT2FN[config.projector_hidden_act]
         self.linear_2 = nn.Linear(
-            config.text_config.hidden_size, config.text_config.hidden_size, bias=config.multimodal_projector_bias
+            config.text_config.hidden_size, config.text_config.hidden_size, bias=getattr(config, "multimodal_projector_bias", True)
         )
 
     def forward(self, image_features):
