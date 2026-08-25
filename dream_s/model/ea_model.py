@@ -479,16 +479,22 @@ class EaModel(nn.Module):
 
         start = time.time()
 
-        
+        # 增量修改: 支持 head_ratio / token_ratio / use_prune_head 配置（测试矩阵用）
+        _use_prune_head = getattr(self, "use_prune_head", None)
+        _head_ratio = getattr(self, "head_ratio", None)
+        _token_ratio = getattr(self, "token_ratio", None)
+
         if output_attention_scores:
             draft_input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token, target_score, draft_score, image_start, image_end, text_start, text_end  = initialize_tree(
-                input_ids, self, past_key_values, logits_processor, self.embed_model, pixel_values, image_sizes, output_draft_attention_scores=True, original_prompt_length=original_prompt_length
+                input_ids, self, past_key_values, logits_processor, self.embed_model, pixel_values, image_sizes, output_draft_attention_scores=True, original_prompt_length=original_prompt_length,
+                use_prune_head=_use_prune_head, head_ratio=_head_ratio, ratio=_token_ratio
             )
-            all_attention_scores = [draft_score] 
+            all_attention_scores = [draft_score]
         else:
             draft_input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, logits, hidden_state, sample_token,  target_score, draft_score, image_start, image_end, text_start, text_end = initialize_tree(
                 input_ids, self, past_key_values, logits_processor, self.embed_model, pixel_values, image_sizes,
-                original_prompt_length=original_prompt_length
+                original_prompt_length=original_prompt_length,
+                use_prune_head=_use_prune_head, head_ratio=_head_ratio, ratio=_token_ratio
             )
             all_attention_scores = []
 

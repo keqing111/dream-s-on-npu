@@ -1419,8 +1419,9 @@ class Model(nn.Module):
             ss_token.append(topk_index)
             scores_list.append(cu_scores)
             tree_mask = torch.cat((tree_mask[:, :, out_ids], self.tree_mask_init), dim=3)
-            # if self.threshold < 0 and cu_scores.max() < self.threshold:
-            #     break
+            # 阈值提前停止: 当 beam 最高分数低于阈值时不再展开树（自适应树大小）
+            if self.threshold < 0 and cu_scores.max() < self.threshold:
+                break
 
         # del parents_list,scores_list,ss_token
         # return draft_tokens, mask_index,tree_mask,tree_position_ids
@@ -1429,6 +1430,8 @@ class Model(nn.Module):
 
         scores_list = torch.cat(scores_list, dim=0).view(-1)
         ss_token_list = torch.cat(ss_token, dim=0).view(-1)
+        # 自适应树: 若阈值提前停止导致候选不足，钳制树大小为实际可用数
+        total_tokens = min(total_tokens, scores_list.numel())
         top_scores = torch.topk(scores_list, total_tokens, dim=-1)
         top_scores_index = top_scores.indices
         top_scores_index = torch.sort(top_scores_index).values

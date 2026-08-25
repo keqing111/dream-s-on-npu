@@ -255,7 +255,7 @@ def prune_image_tokens(
 
     return new_input_ids, new_embeds
 
-def initialize_tree(input_ids, model, past_key_values, logits_processor, embed_model, pixel_values, image_sizes, output_draft_attention_scores=False,  original_prompt_length=None):
+def initialize_tree(input_ids, model, past_key_values, logits_processor, embed_model, pixel_values, image_sizes, output_draft_attention_scores=False,  original_prompt_length=None, use_prune_head=None, head_ratio=None, ratio=None):
     input_embeds = embed_model(input_ids, pixel_values=pixel_values, image_sizes=image_sizes)
 
     outputs, orig, hidden_states, target_scores = model(
@@ -279,9 +279,12 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor, embed_m
     text_end = original_prompt_length-5
 
     
-    use_prune_head = False
-    head_ratio = 0.8  #head pruning ratio
-    ratio = 0.75 #Image token pruning ratio
+    if use_prune_head is None:
+        use_prune_head = False
+    if head_ratio is None:
+        head_ratio = 0.8  #head pruning ratio
+    if ratio is None:
+        ratio = 0.7  #Image token pruning ratio（匹配 prune_image_tokens 默认 0.7，保持现状）
 
     device = input_ids.device
     image_attention_score = target_scores[:, image_start:image_end].to(device)
@@ -295,7 +298,7 @@ def initialize_tree(input_ids, model, past_key_values, logits_processor, embed_m
     draft_embeds = input_embeds[:,keep_indexs,:]
 
 
-    draft_input_ids, draft_embeds = prune_image_tokens(input_ids=input_ids, embeds=input_embeds, scores=target_scores, image_token_id=32000)
+    draft_input_ids, draft_embeds = prune_image_tokens(input_ids=input_ids, embeds=input_embeds, scores=target_scores, image_token_id=32000, keep_ratio=ratio)
     # draft_input_ids, draft_embeds = input_ids, input_embeds
     draft_input_ids = torch.cat((draft_input_ids, token.to(input_ids.device)), dim=1)
     
