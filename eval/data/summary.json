@@ -1,0 +1,10 @@
+{
+  "n_samples": 3,
+  "n_scored": 3,
+  "naive_acc": 0.3333333333333333,
+  "ea_acc": 0.3333333333333333,
+  "naive_avg_time": 1.47,
+  "ea_avg_time": 1.739,
+  "speedup": 0.845,
+  "output_dir": "/tmp/bench_results"
+}

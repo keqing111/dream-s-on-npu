@@ -1,0 +1,30 @@
+[
+  {
+    "config": "baseline",
+    "threshold": 1.0,
+    "total_token": 60,
+    "avg_per_token_speedup": 1.897,
+    "avg_accept_len": 3.34
+  },
+  {
+    "config": "thr0.7",
+    "threshold": 0.7,
+    "total_token": 60,
+    "avg_per_token_speedup": 1.43,
+    "avg_accept_len": 2.37
+  },
+  {
+    "config": "small20",
+    "threshold": 1.0,
+    "total_token": 20,
+    "avg_per_token_speedup": 1.731,
+    "avg_accept_len": 3.28
+  },
+  {
+    "config": "thr0.7+small20",
+    "threshold": 0.7,
+    "total_token": 20,
+    "avg_per_token_speedup": 1.455,
+    "avg_accept_len": 2.46
+  }
+]
