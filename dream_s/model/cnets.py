@@ -22,6 +22,12 @@ import copy
 import os
 # os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 import math
+
+# 精度对照捕获: 在指定点保存中间张量 (CAPTURE=1 时启用)
+DRAFT_CAP = {}
+def _cap(name, t):
+    if os.environ.get("CAPTURE") and name not in DRAFT_CAP and t is not None:
+        DRAFT_CAP[name] = t.detach().to(torch.float32).cpu()
 from typing import List, Optional, Tuple, Union
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -490,6 +496,11 @@ class LlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         # print("post_ratio:", head_ratio)
 
+        if os.environ.get("DEBUG_MASK"):
+            print(f"[HSin] layer={getattr(self,'_draft_layer_idx', getattr(self,'layer_idx','?'))} hidden min={hidden_states.min().item():.1f} "
+                  f"max={hidden_states.max().item():.1f} nan={bool(torch.isnan(hidden_states).any())} "
+                  f"inf={bool(torch.isinf(hidden_states).any())}", flush=True)
+
         apply_head_masking = head_ratio is not None and head_ratio < 1.0
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -526,6 +537,16 @@ class LlamaAttention(nn.Module):
                 key_states = self.k_proj(hidden_states)
                 value_states = self.v_proj(hidden_states)
 
+        _lid = getattr(self, "_draft_layer_idx", "?")
+        _cap(f"l{_lid}_q", query_states)
+        _cap(f"l{_lid}_k", key_states)
+
+        if os.environ.get("DEBUG_MASK"):
+            print(f"[QK] layer={getattr(self,'layer_idx','?')} q[min={query_states.min().item():.1f},"
+                  f"max={query_states.max().item():.1f}] k[min={key_states.min().item():.1f},"
+                  f"max={key_states.max().item():.1f}] qnan={bool(torch.isnan(query_states).any())} "
+                  f"kinf={bool(torch.isinf(key_states).any())} qinf={bool(torch.isinf(query_states).any())}", flush=True)
+
         # print("q_state: ", query_states.shape)
         # print("k_state: ", key_states.shape)
         # print("v_state: ", value_states.shape)
@@ -553,7 +574,16 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if os.environ.get("FP32_ATTN"):
+            attn_weights = torch.matmul(query_states.to(torch.float32), key_states.to(torch.float32).transpose(2, 3)) / math.sqrt(self.head_dim)
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        _cap(f"l{_lid}_qkt", attn_weights)
+
+        if os.environ.get("DEBUG_MASK"):
+            print(f"[ATTNpre] nan={bool(torch.isnan(attn_weights).any())} inf={bool(torch.isinf(attn_weights).any())} "
+                  f"max={attn_weights.max().item():.1f} min={attn_weights.min().item():.1f} dtype={attn_weights.dtype}", flush=True)
 
         if attn_weights.size() != (bsz,cur_num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -566,10 +596,18 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
+            if os.environ.get("DEBUG_MASK"):
+                print(f"[MASKADD] mask_dtype={attention_mask.dtype} has_inf={bool(torch.isinf(attention_mask).any())} "
+                      f"has_nan={bool(torch.isnan(attention_mask).any())}", flush=True)
             attn_weights = attn_weights + attention_mask
+            if os.environ.get("DEBUG_MASK"):
+                print(f"[ATTNpost] nan={bool(torch.isnan(attn_weights).any())} inf={bool(torch.isinf(attn_weights).any())} "
+                      f"dtype={attn_weights.dtype}", flush=True)
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        if os.environ.get("DEBUG_MASK"):
+            print(f"[ATTNsoftmax] nan={bool(torch.isnan(attn_weights).any())}", flush=True)
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, cur_num_heads, q_len, self.head_dim):
@@ -604,6 +642,7 @@ class LlamaAttention(nn.Module):
             if not output_attentions:
                 attn_weights = None
 
+        _cap(f"l{_lid}_attnout", attn_output)
         return attn_output, attn_weights, past_key_value
 
 
@@ -665,6 +704,7 @@ class LlamaDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = LlamaAttention(config=config)
+        self.self_attn._draft_layer_idx = index
         self.mlp = LlamaMLP(config)
         self.index = index
         if self.index != 0:
@@ -1068,6 +1108,14 @@ class Model(nn.Module):
                 tree_mask == 0
                 ] = torch.finfo(torch.float32).min
 
+        if os.environ.get("DEBUG_MASK"):
+            _m = combined_attention_mask
+            if _m is not None:
+                _m16 = _m.to(torch.float16)
+                print(f"[MASK] {tuple(_m.shape)} min={_m.min().item():.1f} max={_m.max().item():.1f} "
+                      f"nan={bool(torch.isnan(_m).any())} inf={bool(torch.isinf(_m).any())} "
+                      f"| fp16后 nan={bool(torch.isnan(_m16).any())} inf={bool(torch.isinf(_m16).any())}", flush=True)
+
         return combined_attention_mask
 
 
@@ -1143,6 +1191,7 @@ class Model(nn.Module):
 
         # hidden_states=self.act(self.fc(torch.cat((inputs_embeds,hidden_states),dim=-1)))
         hidden_states = inputs_embeds
+        _cap("input_hidden", hidden_states)
         #hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
         
         all_hidden_states = () if output_hidden_states else None
@@ -1213,6 +1262,7 @@ class Model(nn.Module):
                 )
 
             hidden_states = layer_outputs[0]
+            _cap(f"l{idx}_out", hidden_states)
 
             if output_attention_scores:
                 all_attention_scores += (layer_outputs[-1],)
@@ -1223,6 +1273,7 @@ class Model(nn.Module):
                 next_decoder_cache += (cache_item,)
 
         hidden_states = self.norm(hidden_states)
+        _cap("final_hidden", hidden_states)
         
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1254,7 +1305,8 @@ class Model(nn.Module):
     @torch.no_grad()
     def topK_genrate(self, hidden_states, input_ids, head, logits_processor, input_embeds=None, output_draft_attention_scores=False, original_prompt_length=None, image_start=None, image_end=None, text_start=None, text_end=None, use_prune_head=None, head_ratio=None):
         head = self.head_weight
-        
+        _cap("last_hidden_states", hidden_states)
+
 
         input_ids = input_ids.to(hidden_states.device)
         total_tokens = self.total_tokens
@@ -1335,10 +1387,18 @@ class Model(nn.Module):
         last_hidden = out_hidden[:, -1]
 
         last_headout = head(last_hidden)
+        _cap("head_out", last_headout)
+        if os.environ.get("DEBUG_MASK"):
+            print(f"[HEADOUT] min={last_headout.min().item():.1f} max={last_headout.max().item():.1f} "
+                  f"nan={bool(torch.isnan(last_headout).any())} inf={bool(torch.isinf(last_headout).any())}", flush=True)
 
         last_p = self.logsoftmax(last_headout)
         top = torch.topk(last_p, top_k, dim=-1)
+        _cap("topk_tokens", top.indices)
+        _cap("topk_scores", top.values)
         topk_index, topk_p = top.indices, top.values
+        # 采集: pos1 (level 0) draft top-k token + logprob
+        self._draft_pos1 = {"tokens": topk_index[0].tolist(), "scores": topk_p[0].tolist()}
         scores = topk_p[0]
         scores_list.append(scores[None])
         parents_list.append(torch.zeros(1, dtype=torch.long, device=scores.device))
@@ -1396,6 +1456,9 @@ class Model(nn.Module):
             parents_list.append(parents)
 
             last_headout = head(out_hidden[0])
+            if os.environ.get("DEBUG_MASK"):
+                print(f"[HEADOUT_L{i}] min={last_headout.min().item():.1f} max={last_headout.max().item():.1f} "
+                      f"nan={bool(torch.isnan(last_headout).any())} inf={bool(torch.isinf(last_headout).any())}", flush=True)
             last_p = self.logsoftmax(last_headout)
 
             top = torch.topk(last_p, top_k, dim=-1)
@@ -1425,6 +1488,14 @@ class Model(nn.Module):
 
         # del parents_list,scores_list,ss_token
         # return draft_tokens, mask_index,tree_mask,tree_position_ids
+
+        # 采集: 每层 draft top-1 token + logprob（level i = 树的 depth i+1）
+        self._draft_level_top1 = []
+        for _lev in range(len(ss_token)):
+            _s = scores_list[_lev].flatten()
+            _idx = _s.argmax()
+            _tok = ss_token[_lev].flatten()[_idx]
+            self._draft_level_top1.append({"depth": _lev + 1, "token": int(_tok), "score": float(_s[_idx])})
 
         # with Timer("post"):
 

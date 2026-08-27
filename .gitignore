@@ -171,3 +171,11 @@ llava-v1.6-vicuna-7b-hf/
 # Claude 本地设置
 .claude/settings.local.json
 eval/data/*.parquet
+
+# NPU 实验输出与大数据
+output/
+*.pkl
+liuhaotian-llava-v1.6-vicuna-7b/
+eval/data/semantic_capture*.jsonl
+eval/data/*temp1.0*.jsonl
+eval/data/*temp1.jsonl

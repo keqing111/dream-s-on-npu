@@ -164,6 +164,24 @@ model = EaModel.from_pretrained(
     device_map="npu:0",
 )
 model.eval()
+
+# ==== TRACE HOOK (注入) ====
+import dream_s.model.ea_model as _EM
+TRACE = []
+_orig_tree = _EM.tree_decoding
+def _tree_hooked(model, tree_candidates, past_key_values, tree_position_ids, input_ids, retrieve_indices, output_draft_attention_scores=False):
+    res = _orig_tree(model, tree_candidates, past_key_values, tree_position_ids, input_ids, retrieve_indices, output_draft_attention_scores)
+    TRACE.append({"draft": tree_candidates, "ri": retrieve_indices})
+    return res
+_EM.tree_decoding = _tree_hooked
+_orig_ep = _EM.evaluate_posterior
+def _ep_hooked(logits, candidates, lp):
+    res = _orig_ep(logits, candidates, lp)
+    if res is not None and TRACE:
+        TRACE[-1]["bc"] = res[0]; TRACE[-1]["al"] = res[1]
+    return res
+_EM.evaluate_posterior = _ep_hooked
+# ==== TRACE HOOK END ====
 # warmup(model)
 
 question_file = f"data/question.jsonl"
@@ -176,6 +194,7 @@ import time
 import json
 
 sample_num = int(os.environ.get("SAMPLE_NUM", "1000"))
+QID = int(os.environ.get("QID", "0"))
 
 if args.dataset == "MMT-Bench":
     ds = load_dataset(path="datasets/test/mmt", data_files = "datasets/test/mmt/MMT-Bench_ALL.tsv", split="train")
@@ -258,13 +277,17 @@ def load_image_path(base_path, image_path):
         img = None 
     return img
 
-os.makedirs("/home/y50063564/DREAM-S/output", exist_ok=True)
-answer_file = f"/home/y50063564/DREAM-S/output/{args.dataset}-{args.version}-top{args.topk}-d{args.depth}-total{args.total_token}-temp{args.temperature}.jsonl"
+os.makedirs("/home/y50063564/DREAM-S/eval/data", exist_ok=True)
+answer_file = f"/home/y50063564/DREAM-S/eval/data/{args.dataset}-{args.version}-top{args.topk}-d{args.depth}-total{args.total_token}-temp{args.temperature}.jsonl"
+speed_up_avg = []
+ar = []
+sd = []
 adl = []
 accept_avg = []
 temperature = args.temperature
 top_p = 0.6
 for i in range(sample_num):
+    TRACE.clear()
     if args.dataset == "MMT-Bench":
         messages = [
             {"role": "user", "content": [
@@ -334,8 +357,27 @@ for i in range(sample_num):
     input_ids = inputs.input_ids
     input_ids = torch.as_tensor(input_ids).to("npu:0")   # NPU 适配
     input_len = input_ids.shape[1]
+    naive_text = []
+    cu_len = input_len
+    totaltime=0
+    start_time=time.time()
+    total_ids=0
 
-    # 仅跑 ea（投机解码）。naive 基线已移除（不再统计加速比）。
+    start = time.time()
+    for output_ids in model.naive_generate(inputs, temperature=temperature, top_p=top_p,
+                                        max_new_tokens=args.max_new_token, max_length=args.max_length,
+                                        is_llama3=args.model_type=="llama-3-instruct"):
+        totaltime += (time.time() - start_time)
+        total_ids+=1
+        decode_ids = output_ids[0, input_len:].tolist()
+        decode_ids = truncate_list(decode_ids, model.tokenizer.eos_token_id)
+        text = model.tokenizer.decode(decode_ids, skip_special_tokens=True, spaces_between_special_tokens=False,
+                                        clean_up_tokenization_spaces=True, )
+        cu_len = output_ids.shape[1]
+        start_time = time.time()
+    ar_time = totaltime
+
+
     totaltime=0
     start_time=time.time()
     total_ids=0
@@ -365,7 +407,52 @@ for i in range(sample_num):
         final_target_score = target_score
         final_all_attention_scores = all_attention_scores
 
+    sd_time = totaltime
     decoded_output = text
+
+    # ==== COMPLETE DUMP (注入) ====
+    dump = []
+    if TRACE and i == QID:
+        al_list = [int(t.get("al", -1)) for t in TRACE]
+        print(f"### TRACE: yields={total_ids} new_tokens={new_tokens} evalAL={new_tokens/total_ids:.3f}", flush=True)
+        for si, t in enumerate(TRACE):
+            dt = t["draft"]; ri = t["ri"]
+            dtt = dt[0].tolist() if dt is not None else []
+            bc = int(t.get("bc", -1)); al = int(t.get("al", -1))
+            # 完整候选路径: 每个叶子 = retrieve_indices 的一行 -> 该叶子的 token 路径
+            cand_paths = []   # [[token ids], ...]
+            if ri is not None:
+                for leaf in range(ri.shape[0]):
+                    path = [dtt[n] if 0 <= n < len(dtt) else -1 for n in ri[leaf].tolist()]
+                    cand_paths.append(path)
+            # 被采纳路径
+            acc_path_ids = []
+            if al >= 0 and ri is not None and bc >= 0 and bc < ri.shape[0]:
+                acc_path_ids = cand_paths[bc][:al+1]
+            # 整棵树的去重 token 集
+            tree_tokens = sorted(set(x for x in dtt if x >= 0))
+            step_dump = {
+                "step": si,
+                "accept_length": al,
+                "best_candidate": bc,
+                "num_leaves": ri.shape[0] if ri is not None else 0,
+                "max_depth": ri.shape[1] if ri is not None else 0,
+                "draft_tokens_all": dtt,
+                "tree_token_set": tree_tokens,
+                "candidate_paths": cand_paths,
+                "accepted_path_tokens": acc_path_ids,
+            }
+            dump.append(step_dump)
+            print(f"[步{si}] accept={al} 叶数={step_dump['num_leaves']} 深={step_dump['max_depth']} 采纳路径={model.tokenizer.decode(acc_path_ids, skip_special_tokens=True)!r}", flush=True)
+        dump_file = f"/home/y50063564/DREAM-S/output/spec_dump_qid{QID}.json"
+        with open(dump_file, "w") as f:
+            json.dump({"question_id": i, "input_len": input_len,
+                       "decoded_output": decoded_output,
+                       "new_tokens": new_tokens, "total_ids": total_ids,
+                       "al_reported": new_tokens/total_ids,
+                       "steps": dump}, f, ensure_ascii=False, indent=1)
+        print(f"### 完整 dump 已保存: {dump_file} ({len(dump)} 步)", flush=True)
+    # ==== COMPLETE DUMP END ====
 
 
     record = {
@@ -373,11 +460,17 @@ for i in range(sample_num):
         "decoded_output": decoded_output,
         # "accept_length_list": accept_length_list,
         "average_accept_length": f"{new_tokens/total_ids:.2f}",
+        "speedup": ar_time / sd_time
     }
 
     print('record: ', record, flush=True)
     with open(answer_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    speed_up_avg.append(ar_time / sd_time)
+    ar.append(ar_time)
+    sd.append(sd_time)
     adl.append(new_tokens/total_ids)
     # accept_avg.append(avg_accept_length)
+print('average speed up: ', sum(ar)/sum(sd))
+print('max speedup: ', max(speed_up_avg))
 print(f'average draft length: {sum(adl)/len(adl):.2f}, max draft length: {max(adl):.2f}')

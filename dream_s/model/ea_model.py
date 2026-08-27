@@ -80,13 +80,13 @@ class EaModel(nn.Module):
                            device="cpu") as f:
                 tensor_slice = f.get_slice("language_model.lm_head.weight")
                 vocab_size, hidden_dim = tensor_slice.get_shape()
-                tensor = tensor_slice[:, :hidden_dim].to(torch.bfloat16)
+                tensor = tensor_slice[:, :hidden_dim].to(base_model.dtype)
         except Exception as e:
             with open(os.path.join(base_model_name_or_path, "pytorch_model.bin.index.json"), "r") as f:
                 index_json = json.loads(f.read())
                 head_path = index_json["weight_map"]["lm_head.weight"]
                 weights = torch.load(os.path.join(base_model_name_or_path, head_path), weights_only=False)
-                tensor = weights["lm_head.weight"].to(torch.bfloat16)
+                tensor = weights["lm_head.weight"].to(base_model.dtype)
         head = torch.nn.Linear(tensor.shape[1], tensor.shape[0], bias=False)
         head.weight.data = tensor
         self.ea_layer.head_weight = head
@@ -197,7 +197,10 @@ class EaModel(nn.Module):
 
         with torch.inference_mode():
             # Pass input through the base model
-            outputs = self.base_model.model(
+            # TARGET_LAYER 环境变量: 注入不同层的 hidden_states 到 draft cross-attention
+            #   -1 (默认) = 最后一层; -2/-3/-4 = 倒数第2/3/4层 (all_hidden_states 索引)
+            _target_layer = int(os.environ.get("TARGET_LAYER", "-1"))
+            _kw = dict(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -205,9 +208,18 @@ class EaModel(nn.Module):
                 position_ids=position_ids,
                 output_attan_score=output_attan_score,
             )
+            if _target_layer != -1:
+                _kw["output_hidden_states"] = True
+            outputs = self.base_model.model(**_kw)
             if output_orig:
                 orig = self.base_model.lm_head(outputs[0])
-            hidden_states = outputs[0]
+            if _target_layer == -1:
+                hidden_states = outputs[0]
+            else:
+                _hs = getattr(outputs, "hidden_states", None)
+                if _hs is None:
+                    _hs = outputs[2]
+                hidden_states = _hs[_target_layer]
 
         if output_orig:
             if output_attan_score:
@@ -232,7 +244,7 @@ class EaModel(nn.Module):
 
     ):
         input_ids = inputs.input_ids.to(self.base_model.device)
-        pixel_values = inputs.pixel_values.to(self.base_model.device).to(torch.bfloat16) if hasattr(inputs, "pixel_values") else None
+        pixel_values = inputs.pixel_values.to(self.base_model.device).to(self.embed_model.vision_tower.dtype) if hasattr(inputs, "pixel_values") else None
         image_sizes = inputs.image_sizes.to(self.base_model.device) if hasattr(inputs, "image_sizes") else None
 
         if is_llama3:
@@ -437,7 +449,7 @@ class EaModel(nn.Module):
 
     ):
         input_ids = inputs.input_ids.to(self.base_model.device)
-        pixel_values = inputs.pixel_values.to(self.base_model.device).to(torch.bfloat16) if hasattr(inputs, "pixel_values") else None
+        pixel_values = inputs.pixel_values.to(self.base_model.device).to(self.embed_model.vision_tower.dtype) if hasattr(inputs, "pixel_values") else None
         image_sizes = inputs.image_sizes.to(self.base_model.device) if hasattr(inputs, "image_sizes") else None
 
         original_prompt_length = int(input_ids.shape[1] * 1)
